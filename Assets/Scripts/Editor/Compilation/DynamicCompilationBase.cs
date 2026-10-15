@@ -61,13 +61,27 @@ namespace FastScriptReload.Editor.Compilation
         {
             //needs to be set from main thread
             ActiveScriptCompilationDefines = EditorUserBuildSettings.activeScriptCompilationDefines;
-            AssemblyCsharpFullPath = SessionStateCache.GetOrCreateString(
-	            $"FSR:AssemblyCsharpFullPath", 
-	            () => AssetDatabase.FindAssets("Microsoft.CSharp")
-					            .Select(g => new System.IO.FileInfo(UnityEngine.Application.dataPath + "/../" + AssetDatabase.GUIDToAssetPath(g)))
-					            .First(fi => fi.Name.ToLower() == "Microsoft.CSharp.dll".ToLower()).FullName
-	        );
+            AssemblyCsharpFullPath = SessionStateCache.GetOrCreateString($"FSR:AssemblyCsharpFullPath", FindMicrosoftCSharpDll);
+        }
 
+        /// <summary>
+        /// Looks in FSR's own package folder first: on a domain reload right after a package resolve, and in asset import workers,
+        /// the asset database does not list the package's files yet, and a throw here disables FSR until the next domain reload.
+        /// </summary>
+        private static string FindMicrosoftCSharpDll()
+        {
+            var package = UnityEditor.PackageManager.PackageInfo.FindForAssembly(typeof(DynamicCompilationBase).Assembly);
+            if (package != null)
+            {
+                var inPackage = Path.Combine(package.resolvedPath, "Plugins", "Roslyn", "Microsoft.CSharp.dll");
+                if (File.Exists(inPackage)) return new FileInfo(inPackage).FullName;
+            }
+
+            var found = AssetDatabase.FindAssets("Microsoft.CSharp")
+                .Select(guid => new FileInfo(Application.dataPath + "/../" + AssetDatabase.GUIDToAssetPath(guid)))
+                .FirstOrDefault(file => file.Name.Equals("Microsoft.CSharp.dll", StringComparison.OrdinalIgnoreCase));
+            if (found == null) throw new FileNotFoundException("FSR: Microsoft.CSharp.dll is in neither FSR's package folder nor the asset database");
+            return found.FullName;
         }
         
         protected static CreateSourceCodeCombinedContentsResult CreateSourceCodeCombinedContents(List<string> sourceCodeFiles, List<string> definedPreprocessorSymbols)

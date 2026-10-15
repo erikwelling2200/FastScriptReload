@@ -157,9 +157,10 @@ namespace FastScriptReload.Editor.AgentBridge
             var requeue = loaded.patched.Where(entry => string.IsNullOrEmpty(entry.package)).ToList();
             if (!string.IsNullOrEmpty(loaded.pendingCompileStartUtc))
             {
-                // The compile loaded every project file from disk. A package edit that could not be synced is still not in it.
+                // The compile loaded every project file from disk. A package edit that could not be synced is still not in it, but
+                // one whose checkout matches the cache now is: nothing would ever offer it again, so it would stay listed for good.
                 requeue.Clear();
-                loaded = new Session { epochUtc = loaded.pendingCompileStartUtc, stale = loaded.stale.Where(entry => !string.IsNullOrEmpty(entry.package)).ToList() };
+                loaded = new Session { epochUtc = loaded.pendingCompileStartUtc, stale = loaded.stale.Where(entry => !string.IsNullOrEmpty(entry.package) && !CacheMatchesCheckout(entry)).ToList() };
             }
             else if (string.IsNullOrEmpty(loaded.epochUtc))
             {
@@ -665,6 +666,16 @@ namespace FastScriptReload.Editor.AgentBridge
             var cacheFile = CacheFileOf(entry);
             if (!entry.existedInPin) return File.Exists(cacheFile);
             return !File.Exists(cacheFile) || !File.ReadAllBytes(cacheFile).SequenceEqual(File.ReadAllBytes(PristineFor(entry)));
+        }
+
+        /// <summary>Whether this editor's package cache holds the checkout's version of a stale package file, line endings aside.</summary>
+        private static bool CacheMatchesCheckout(StaleFile entry)
+        {
+            var info = PackageInfo.GetAllRegisteredPackages().FirstOrDefault(candidate => candidate.name == entry.package);
+            if (info == null) return true;
+            var cacheFile = Path.Combine(info.resolvedPath, entry.packagePath);
+            if (!File.Exists(entry.file) || !File.Exists(cacheFile)) return File.Exists(entry.file) == File.Exists(cacheFile);
+            return File.ReadAllText(entry.file).Replace("\r\n", "\n") == File.ReadAllText(cacheFile).Replace("\r\n", "\n");
         }
 
         private static string CacheFileOf(SyncedFile entry) => Path.Combine(entry.cacheRoot, entry.packagePath);
