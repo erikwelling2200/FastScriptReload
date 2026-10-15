@@ -12,7 +12,7 @@ namespace FastScriptReload.Editor.Compilation
 {
     public class DynamicAssemblyCompiler
     {
-        public static CompileResult Compile(List<string> filePathsWithSourceCode, UnityMainThreadDispatcher unityMainThreadDispatcher)
+        public static CompileResult Compile(List<string> filePathsWithSourceCode, UnityMainThreadDispatcher unityMainThreadDispatcher, IReadOnlyCollection<string> preprocessorSymbols = null)
         {
             var sw = new Stopwatch();
             sw.Start();
@@ -20,7 +20,7 @@ namespace FastScriptReload.Editor.Compilation
 #if FastScriptReload_CompileViaMCS
         var result = McsExeDynamicCompilation.Compile(filePathsWithSourceCode);
 #else
-            var compileResult = DotnetExeDynamicCompilation.Compile(filePathsWithSourceCode, unityMainThreadDispatcher);
+            var compileResult = DotnetExeDynamicCompilation.Compile(filePathsWithSourceCode, unityMainThreadDispatcher, preprocessorSymbols);
 #endif  
         
             LoggerScoped.Log($"Files: {string.Join(",", filePathsWithSourceCode.Select(fn => new FileInfo(fn).Name))} changed " +

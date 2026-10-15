@@ -90,8 +90,10 @@ namespace FastScriptReload.Editor.Compilation
             });
         }
 
-        public static CompileResult Compile(List<string> filePathsWithSourceCode, UnityMainThreadDispatcher unityMainThreadDispatcher)
+        /// <param name="preprocessorSymbols">Defines to compile with; null uses the project-wide defines, which lack each assembly's own version defines.</param>
+        public static CompileResult Compile(List<string> filePathsWithSourceCode, UnityMainThreadDispatcher unityMainThreadDispatcher, IReadOnlyCollection<string> preprocessorSymbols = null)
         {
+            var defines = (preprocessorSymbols ?? ActiveScriptCompilationDefines).ToList();
             var sourceCodeCombinedFilePath = string.Empty;
             try
             {
@@ -101,7 +103,7 @@ namespace FastScriptReload.Editor.Compilation
                 sourceCodeCombinedFilePath = _tempFolder + $"{asmName}.SourceCodeCombined.cs";
                 var outLibraryPath = $"{_tempFolder}{asmName}.dll";
 
-                var createSourceCodeCombinedResult = CreateSourceCodeCombinedContents(filePathsWithSourceCode, ActiveScriptCompilationDefines.ToList());
+                var createSourceCodeCombinedResult = CreateSourceCodeCombinedContents(filePathsWithSourceCode, defines);
                 CreateFileAndTrackAsCleanup(sourceCodeCombinedFilePath, createSourceCodeCombinedResult.SourceCode, _createdFilesToCleanUp);
 #if UNITY_EDITOR
                 unityMainThreadDispatcher.Enqueue(() =>
@@ -119,7 +121,7 @@ namespace FastScriptReload.Editor.Compilation
 
                 var shouldAddUnsafeFlag = createSourceCodeCombinedResult.SourceCode.Contains("unsafe"); //TODO: not ideal as 'unsafe' can be part of comment, not code. But compiling with that flag in more cases shouldn't cause issues
                 var rspFileContent = GenerateCompilerArgsRspFileContents(outLibraryPath, sourceCodeCombinedFilePath, assemblyAttributeFilePath,
-                    originalAssemblyPathToAsmWithInternalsVisibleToCompiled, shouldAddUnsafeFlag);
+                    originalAssemblyPathToAsmWithInternalsVisibleToCompiled, shouldAddUnsafeFlag, defines);
                 CreateFileAndTrackAsCleanup(rspFile, rspFileContent, _createdFilesToCleanUp);
                 CreateFileAndTrackAsCleanup(assemblyAttributeFilePath, DynamicallyCreatedAssemblyAttributeSourceCode, _createdFilesToCleanUp);
 
@@ -265,13 +267,13 @@ You can also:
         }
 
         private static string GenerateCompilerArgsRspFileContents(string outLibraryPath, string sourceCodeCombinedFilePath, string assemblyAttributeFilePath,
-            Dictionary<string, string> originalAssemblyPathToAsmWithInternalsVisibleToCompiled, bool addUnsafeFlag)
+            Dictionary<string, string> originalAssemblyPathToAsmWithInternalsVisibleToCompiled, bool addUnsafeFlag, List<string> defines)
         {
             var rspContents = new StringBuilder();
             rspContents.AppendLine("-target:library");
             rspContents.AppendLine($"-out:\"{outLibraryPath}\"");
             // rspContents.AppendLine($"-refout:\"{tempFolder}{asmName}.ref.dll\""); //reference assembly for linking, not needed
-            foreach (var symbol in ActiveScriptCompilationDefines)
+            foreach (var symbol in defines)
             {
                 rspContents.AppendLine($"-define:{symbol}");
             }

@@ -132,7 +132,7 @@ namespace FastScriptReload.Editor.Compilation
                         t => t.Key,
                         t =>
                         {
-                            if (!ProjectTypeCache.AllTypesInNonDynamicGeneratedAssemblies.TryGetValue(t.Key, out var existingType))
+                            if (!ProjectTypeCache.TryGetType(t.Key, out var existingType))
                             {
                                 LoggerScoped.LogDebug($"Unable to find type: {t.Key} in loaded assemblies. If that's the class you've added field to then it may not be properly working. It's possible the class was not yet loaded / used and you can ignore that warning. If it's causing any issues please contact support");
                                 return new List<string>();

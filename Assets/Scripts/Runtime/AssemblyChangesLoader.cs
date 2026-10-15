@@ -49,12 +49,27 @@ namespace FastScriptReload.Runtime
 
         private Dictionary<Type, Type> _existingTypeToRedirectedType = new Dictionary<Type, Type>();
 
+        /// <summary>
+        /// Everything the last <see cref="DynamicallyUpdateMethodsForCreatedAssembly"/> call left unpatched. Each entry means
+        /// the editor still runs the previous code for that type or member, so a caller that needs certainty must treat it as a failure.
+        /// </summary>
+        public List<DetourIssue> LastDetourIssues { get; } = new List<DetourIssue>();
+
         public void DynamicallyUpdateMethodsForCreatedAssembly(Assembly dynamicallyLoadedAssemblyWithUpdates, AssemblyChangesLoaderEditorOptionsNeededInBuild editorOptions)
         {
             try
             {
                 var sw = new Stopwatch();
                 sw.Start();
+                LastDetourIssues.Clear();
+
+                foreach (var createdValueType in dynamicallyLoadedAssemblyWithUpdates.GetTypes().Where(t => t.IsValueType && !t.IsEnum && !t.IsPrimitive))
+                {
+                    if (ProjectTypeCache.TryGetType(RemoveClassPostfix(createdValueType.FullName), out _))
+                    {
+                        LastDetourIssues.Add(new DetourIssue(RemoveClassPostfix(createdValueType.FullName), null, "struct methods are never redirected"));
+                    }
+                }
 
                 foreach (var createdType in dynamicallyLoadedAssemblyWithUpdates.GetTypes()
                              .Where(t => (t.IsClass
@@ -67,11 +82,12 @@ namespace FastScriptReload.Runtime
                     {
                         //TODO: ideally type would be excluded from compilation not just from detour
                         LoggerScoped.Log($"Type: {createdType.Name} marked as {nameof(PreventHotReload)} - ignoring change.");
+                        LastDetourIssues.Add(new DetourIssue(RemoveClassPostfix(createdType.FullName), null, $"type is marked {nameof(PreventHotReload)}"));
                         continue;
                     }
                     
                     var createdTypeNameWithoutPatchedPostfix = RemoveClassPostfix(createdType.FullName);
-                    if (ProjectTypeCache.AllTypesInNonDynamicGeneratedAssemblies.TryGetValue(createdTypeNameWithoutPatchedPostfix, out var matchingTypeInExistingAssemblies))
+                    if (ProjectTypeCache.TryGetType(createdTypeNameWithoutPatchedPostfix, out var matchingTypeInExistingAssemblies))
                     {
                         _existingTypeToRedirectedType[matchingTypeInExistingAssemblies] = createdType;
                         
@@ -79,6 +95,7 @@ namespace FastScriptReload.Runtime
                             && !editorOptions.EnableExperimentalAddedFieldsSupport
                             && DidFieldsOrPropertyCountChanged(createdType,  matchingTypeInExistingAssemblies))
                         {
+                            LastDetourIssues.Add(new DetourIssue(createdTypeNameWithoutPatchedPostfix, null, "fields or properties were added or removed"));
                             continue;
                         }
 
@@ -96,12 +113,14 @@ namespace FastScriptReload.Runtime
                                 if (matchingMethodInExistingType.IsGenericMethod)
                                 {
                                     LoggerScoped.LogWarning($"Method: '{matchingMethodInExistingType.FullDescription()}' is generic. Hot-Reload for generic methods is not supported yet, you won't see changes for that method.");
+                                    LastDetourIssues.Add(new DetourIssue(createdTypeNameWithoutPatchedPostfix, matchingMethodInExistingType.Name, "generic method is not redirected"));
                                     continue;
                                 }
 
                                 if (matchingMethodInExistingType.DeclaringType != null && matchingMethodInExistingType.DeclaringType.IsGenericType)
                                 {
                                     LoggerScoped.LogWarning($"Type for method: '{matchingMethodInExistingType.FullDescription()}' is generic. Hot-Reload for generic types is not supported yet, you won't see changes for that type.");
+                                    LastDetourIssues.Add(new DetourIssue(createdTypeNameWithoutPatchedPostfix, matchingMethodInExistingType.Name, "method of a generic type is not redirected"));
                                     continue;
                                 }
 
@@ -115,6 +134,7 @@ namespace FastScriptReload.Runtime
                                                  $"Adding new methods at runtime is not fully supported. \r\n" +
                                                  $"It'll only work new method is only used by declaring class (eg private method)\r\n" +
                                                  $"Make sure to add method before initial compilation.");
+                                LastDetourIssues.Add(new DetourIssue(createdTypeNameWithoutPatchedPostfix, createdTypeMethodToUpdate.Name, "method does not exist in the compiled type"));
                             }
                         }
                         
@@ -124,6 +144,7 @@ namespace FastScriptReload.Runtime
                     else
                     {
                         LoggerScoped.LogWarning($"FSR: Unable to find existing type for: '{createdType.FullName}', this is not an issue if you added new type. <color=orange>If it's an existing type please do a full domain-reload - one of optimisations is to cache existing types for later lookup on first call.</color>");
+                        LastDetourIssues.Add(new DetourIssue(createdTypeNameWithoutPatchedPostfix, null, "type does not exist in the compiled assemblies"));
                         FindAndExecuteStaticOnScriptHotReloadNoInstance(createdType);
                         FindAndExecuteOnScriptHotReload(createdType, createdType);
                     }
@@ -255,6 +276,23 @@ namespace FastScriptReload.Runtime
         
     }
     
+    /// <summary>A type or member <see cref="AssemblyChangesLoader"/> could not redirect; <see cref="MemberName"/> is null for the whole type.</summary>
+    public class DetourIssue
+    {
+        public readonly string TypeFullName;
+        public readonly string MemberName;
+        public readonly string Reason;
+
+        public DetourIssue(string typeFullName, string memberName, string reason)
+        {
+            TypeFullName = typeFullName;
+            MemberName = memberName;
+            Reason = reason;
+        }
+
+        public override string ToString() => MemberName == null ? $"{TypeFullName}: {Reason}" : $"{TypeFullName}.{MemberName}: {Reason}";
+    }
+
     public interface IAssemblyChangesLoader
     {
         void DynamicallyUpdateMethodsForCreatedAssembly(Assembly dynamicallyLoadedAssemblyWithUpdates, AssemblyChangesLoaderEditorOptionsNeededInBuild editorOptions);

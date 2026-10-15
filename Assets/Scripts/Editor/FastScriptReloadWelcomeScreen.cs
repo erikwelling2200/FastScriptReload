@@ -757,7 +757,7 @@ CustomPolling - (experimental) watches files by manual polling for changes, slow
             "Auto-open generated source file for debugging", "IsAutoOpenGeneratedSourceFileOnChangeEnabled", false);
         
         public static readonly ToggleProjectEditorPreferenceDefinition StopShowingAutoReloadEnabledDialogBox = new ToggleProjectEditorPreferenceDefinition(
-            "Stop showing assets/script auto-reload enabled warning", "StopShowingAutoReloadEnabledDialogBox", false);
+            "Stop showing assets/script auto-reload enabled warning", "StopShowingAutoReloadEnabledDialogBox", true); // Changefied: the agent bridge manages auto refresh per session; the dialog's "disable" changes it machine-wide
         public static readonly ToggleProjectEditorPreferenceDefinition EnableDetailedDebugLogging = new ToggleProjectEditorPreferenceDefinition(
             "Enable detailed debug logging", "EnableDetailedDebugLogging", false,
             (object newValue, object oldValue) =>
