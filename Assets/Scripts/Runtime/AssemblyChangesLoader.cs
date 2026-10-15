@@ -55,6 +55,23 @@ namespace FastScriptReload.Runtime
         /// </summary>
         public List<DetourIssue> LastDetourIssues { get; } = new List<DetourIssue>();
 
+        /// <summary>
+        /// Leaves the compiler-generated classes behind coroutines, lambdas and local functions alone. The redirected members
+        /// create the new copies of those, so new calls run the new code; redirecting the old copies too would run new code on
+        /// objects laid out for the old - a running coroutine's hoisted locals - and match lambdas by generated names that shift
+        /// when one is added.
+        /// </summary>
+        public bool SkipCompilerGeneratedTypes { get; set; }
+
+        private static bool IsCompilerGenerated(Type type)
+        {
+            for (var at = type; at != null; at = at.DeclaringType)
+            {
+                if (at.Name.StartsWith("<") || at.IsDefined(typeof(System.Runtime.CompilerServices.CompilerGeneratedAttribute), false)) return true;
+            }
+            return false;
+        }
+
         public void DynamicallyUpdateMethodsForCreatedAssembly(Assembly dynamicallyLoadedAssemblyWithUpdates, AssemblyChangesLoaderEditorOptionsNeededInBuild editorOptions)
         {
             try
@@ -63,7 +80,7 @@ namespace FastScriptReload.Runtime
                 sw.Start();
                 LastDetourIssues.Clear();
 
-                foreach (var createdValueType in dynamicallyLoadedAssemblyWithUpdates.GetTypes().Where(t => t.IsValueType && !t.IsEnum && !t.IsPrimitive))
+                foreach (var createdValueType in dynamicallyLoadedAssemblyWithUpdates.GetTypes().Where(t => t.IsValueType && !t.IsEnum && !t.IsPrimitive && !(SkipCompilerGeneratedTypes && IsCompilerGenerated(t))))
                 {
                     if (ProjectTypeCache.TryGetType(RemoveClassPostfix(createdValueType.FullName), out _))
                     {
@@ -73,7 +90,8 @@ namespace FastScriptReload.Runtime
 
                 foreach (var createdType in dynamicallyLoadedAssemblyWithUpdates.GetTypes()
                              .Where(t => (t.IsClass
-                                         && !typeof(Delegate).IsAssignableFrom(t)) //don't redirect delegates
+                                         && !typeof(Delegate).IsAssignableFrom(t) //don't redirect delegates
+                                         && !(SkipCompilerGeneratedTypes && IsCompilerGenerated(t)))
                                          // || (t.IsValueType && !t.IsPrimitive) //struct check, ensure works
                              )
                         )

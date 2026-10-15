@@ -122,6 +122,9 @@ namespace FastScriptReload.Editor.AgentBridge
 
         static AgentReloadBridge()
         {
+            // An asset import worker loads these assemblies too and shares the project's Library, but has a session of its own: its
+            // start would delete the editor's snapshots, take its requests and overwrite its registration.
+            if (AssetDatabase.IsAssetImportWorkerProcess()) return;
             Directory.CreateDirectory(RequestsPath);
             Directory.CreateDirectory(ResultsPath);
             Directory.CreateDirectory(InFlightPath);
@@ -172,6 +175,7 @@ namespace FastScriptReload.Editor.AgentBridge
             foreach (var entry in requeue) MarkStale(loaded, entry.file, entry.package, entry.packagePath, "a recompile or domain reload dropped its hot-reloaded change");
             foreach (var entry in synced) MarkStale(loaded, entry.checkoutFile, entry.package, entry.packagePath, "a recompile or domain reload happened since it was synced; it is being checked again");
             loaded.patched.Clear();
+            loaded.loadedCodeOptimization = CompilationPipeline.codeOptimization.ToString();
             SaveSession(loaded);
 
             foreach (var directory in Directory.Exists(BaselinesPath) ? Directory.GetDirectories(BaselinesPath) : Array.Empty<string>())
@@ -181,12 +185,29 @@ namespace FastScriptReload.Editor.AgentBridge
 
             var requests = requeue.Select(entry => new Request { file = entry.file, baseline = BaselineFor(loaded, entry.file) })
                 .Concat(synced.Select(entry => new Request { file = entry.checkoutFile, package = entry.package, packagePath = entry.packagePath, checkoutBranch = entry.checkoutBranch }));
+            var reapplying = false;
             foreach (var request in requests)
             {
-                request.id = "reapply-" + Guid.NewGuid().ToString("N");
+                request.id = ReapplyPrefix + Guid.NewGuid().ToString("N");
                 WriteAtomically(Path.Combine(RequestsPath, request.id + ".json"), JsonUtility.ToJson(request));
+                reapplying = true;
             }
+            SessionState.SetBool(HotReloadsPendingKey, reapplying);
             return loaded;
+        }
+
+        private const string ReapplyPrefix = "reapply-";
+
+        /// <summary>
+        /// Raised while edits a domain reload dropped are being applied again, so a playtest run can wait for them: the playtest
+        /// runner reads this key. Lowered once no re-application is queued or in progress.
+        /// </summary>
+        private const string HotReloadsPendingKey = "FastScriptReload.AgentBridge.HotReloadsPending";
+
+        private static void LowerHotReloadsPendingWhenDone()
+        {
+            if (!SessionState.GetBool(HotReloadsPendingKey, false) || pending != null) return;
+            if (new DirectoryInfo(RequestsPath).GetFiles(ReapplyPrefix + "*.json").Length == 0) SessionState.SetBool(HotReloadsPendingKey, false);
         }
 
         private static void OnCompilationStarted(object context)
@@ -218,6 +239,7 @@ namespace FastScriptReload.Editor.AgentBridge
                 if (current != null) Reject(current, "the agent bridge failed while processing this edit: " + Shorten(exception.Message));
             }
             current = null;
+            LowerHotReloadsPendingWhenDone();
 
             if (EditorApplication.timeSinceStartup < nextHeartbeat) return;
             nextHeartbeat = EditorApplication.timeSinceStartup + HeartbeatSeconds;
@@ -276,7 +298,9 @@ namespace FastScriptReload.Editor.AgentBridge
                 }
                 if (string.IsNullOrEmpty(request.baseline) || !File.Exists(request.baseline) || Path.GetFileName(Path.GetDirectoryName(request.baseline)) != session.EpochId)
                 {
-                    Reject(result, "there is no snapshot of this file from the last compile (it is new, or it changed outside agent edits since that compile)");
+                    Reject(result, File.GetLastWriteTimeUtc(file) >= session.EpochStart && !session.IsTracked(file)
+                        ? $"it is new or changed after the last compile started ({session.EpochStart.ToLocalTime():HH:mm:ss}), so whether that compile included it is unknown; recompile once, and edits from then on hot-reload"
+                        : "there is no snapshot of this file from the last compile (it is new, or it changed outside agent edits since that compile)");
                     return;
                 }
                 compiledSource = File.ReadAllText(request.baseline);
@@ -346,7 +370,7 @@ namespace FastScriptReload.Editor.AgentBridge
                 Answer(result, "NoCodeChange", package == null ? "the code is identical to what the editor compiled" : "the code is identical to the package code this editor compiled");
                 return;
             }
-            if (CompilationPipeline.codeOptimization == CodeOptimization.Release) CheckInlining(verdict, assembly);
+            if (CompilationPipeline.codeOptimization == CodeOptimization.Release || session.loadedCodeOptimization != CodeOptimization.Debug.ToString()) CheckInlining(verdict, assembly);
             if (verdict.Violations.Count > 0)
             {
                 Reject(result, verdict.Violations.ToArray());
@@ -392,12 +416,18 @@ namespace FastScriptReload.Editor.AgentBridge
             var loader = AssemblyChangesLoader.Instance;
             try
             {
+                // The gate lets coroutines and lambdas through on the condition that their generated classes are left alone.
+                loader.SkipCompilerGeneratedTypes = true;
                 loader.DynamicallyUpdateMethodsForCreatedAssembly(compile.Result.CompiledAssembly, new AssemblyChangesLoaderEditorOptionsNeededInBuild(false, false));
             }
             catch (Exception exception)
             {
                 Reject(result, "redirecting methods failed part-way, so the editor may run a mix of old and new code: " + Shorten(exception.Message));
                 return;
+            }
+            finally
+            {
+                loader.SkipCompilerGeneratedTypes = false;
             }
             session.patchCount++;
 
@@ -563,7 +593,13 @@ namespace FastScriptReload.Editor.AgentBridge
             var cacheFile = Path.Combine(result.cacheRoot, result.packagePath);
             var inCheckout = File.Exists(result.file);
             var inCache = File.Exists(cacheFile);
-            if (inCheckout && inCache && File.ReadAllBytes(result.file).SequenceEqual(File.ReadAllBytes(cacheFile))) return null;
+            // Line endings aside: Package Manager extracts LF where a Windows checkout has CRLF, and rewriting the same code would
+            // date the cache file after the compile and make it read as an unknown edit.
+            if (inCheckout && inCache && SameText(result.file, cacheFile))
+            {
+                ForgetUndiverged(result);
+                return null;
+            }
             if (!inCheckout && !inCache) return null;
             // Unity ignores a file without a .meta in an immutable package, and cannot write one there itself.
             if (inCheckout && !inCache && !File.Exists(result.file + ".meta")) return "it has no .meta file in the checkout yet; open the package project so Unity creates one, then edit the file again";
@@ -665,8 +701,24 @@ namespace FastScriptReload.Editor.AgentBridge
         {
             var cacheFile = CacheFileOf(entry);
             if (!entry.existedInPin) return File.Exists(cacheFile);
-            return !File.Exists(cacheFile) || !File.ReadAllBytes(cacheFile).SequenceEqual(File.ReadAllBytes(PristineFor(entry)));
+            return !File.Exists(cacheFile) || !SameText(cacheFile, PristineFor(entry));
         }
+
+        /// <summary>Drops the ledger entry for a file whose cached copy is the pinned version again, so it is no longer offered after each compile.</summary>
+        private static void ForgetUndiverged(Result result)
+        {
+            var synced = LoadSynced();
+            var entry = synced.FirstOrDefault(candidate => candidate.package == result.package && candidate.packagePath == result.packagePath && Normalise(candidate.cacheRoot) == Normalise(result.cacheRoot));
+            if (entry == null || Diverges(entry)) return;
+            synced.Remove(entry);
+            DeleteWithMeta(PristineFor(entry));
+            SaveSynced(synced);
+        }
+
+        /// <summary>Whether two files hold the same text, line endings and a byte order mark aside.</summary>
+        private static bool SameText(string a, string b) => Comparable(a) == Comparable(b);
+
+        private static string Comparable(string file) => File.ReadAllText(file).TrimStart('﻿').Replace("\r\n", "\n");
 
         /// <summary>Whether this editor's package cache holds the checkout's version of a stale package file, line endings aside.</summary>
         private static bool CacheMatchesCheckout(StaleFile entry)
@@ -675,7 +727,7 @@ namespace FastScriptReload.Editor.AgentBridge
             if (info == null) return true;
             var cacheFile = Path.Combine(info.resolvedPath, entry.packagePath);
             if (!File.Exists(entry.file) || !File.Exists(cacheFile)) return File.Exists(entry.file) == File.Exists(cacheFile);
-            return File.ReadAllText(entry.file).Replace("\r\n", "\n") == File.ReadAllText(cacheFile).Replace("\r\n", "\n");
+            return SameText(entry.file, cacheFile);
         }
 
         private static string CacheFileOf(SyncedFile entry) => Path.Combine(entry.cacheRoot, entry.packagePath);
@@ -785,6 +837,8 @@ namespace FastScriptReload.Editor.AgentBridge
         {
             public string epochUtc;
             public string pendingCompileStartUtc;
+            /// <summary>The code optimization the loaded code was compiled with; the setting can change before the recompile it asks for.</summary>
+            public string loadedCodeOptimization;
             public int patchCount;
             public string importedUtc;
             public List<PatchedFile> patched = new List<PatchedFile>();

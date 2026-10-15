@@ -26,6 +26,8 @@ namespace FastScriptReload.Editor.AgentBridge
             "InitializeOnLoadMethod", "RuntimeInitializeOnLoadMethod", "DidReloadScripts", "InitializeOnEnterPlayMode",
         };
 
+        private static readonly string[] NetcodeRpcAttributes = { "ServerRpc", "ClientRpc", "Rpc" };
+
         public class Verdict
         {
             public readonly List<string> Violations = new List<string>();
@@ -134,11 +136,25 @@ namespace FastScriptReload.Editor.AgentBridge
                 if (method.Modifiers.Any(SyntaxKind.AsyncKeyword)) verdict.Violations.Add($"{name} is async");
             }
 
-            // Compiler-generated closure, iterator and async classes are matched by generated names that shift between compiles.
-            var generated = new[] { oldMember, newMember }.SelectMany(node => node.DescendantNodes()).FirstOrDefault(node =>
-                node is AnonymousFunctionExpressionSyntax || node is LocalFunctionStatementSyntax || node is QueryExpressionSyntax
-                || node is YieldStatementSyntax || node is AwaitExpressionSyntax);
-            if (generated != null) verdict.Violations.Add($"{name} contains a lambda, local function, query, iterator or await");
+            if (declaration is MemberDeclarationSyntax rpc && NetcodeRpcAttributes.Any(attribute => HasAttribute(rpc.AttributeLists, attribute)))
+            {
+                verdict.Violations.Add($"{name} is a Netcode RPC, which Netcode's IL post-processor rewrites at compile time; a hot-patched copy would skip its client/server routing");
+            }
+
+            // An async state machine can be a struct, and its awaiters resume it from wherever they were captured.
+            var nodes = new[] { oldMember, newMember }.SelectMany(node => node.DescendantNodes()).ToList();
+            if (nodes.Any(node => node is AwaitExpressionSyntax)) verdict.Violations.Add($"{name} contains an await");
+
+            // The compiler-generated classes behind these are not redirected (see AssemblyChangesLoader.SkipCompilerGeneratedTypes): the
+            // patched member creates the patched copies, so new calls run the new code and whatever already exists keeps the old.
+            if (nodes.Any(node => node is YieldStatementSyntax))
+            {
+                verdict.Caveats.Add($"{name} is a coroutine: calls from now on run the new code; one already running finishes on the old code");
+            }
+            if (nodes.Any(node => node is AnonymousFunctionExpressionSyntax || node is LocalFunctionStatementSyntax || node is QueryExpressionSyntax))
+            {
+                verdict.Caveats.Add($"{name} creates lambdas or local functions: those created from now on run the new code; one already created and kept (an event handler, a stored callback) keeps the old code");
+            }
 
             if (declaration is MemberDeclarationSyntax member && HasAttribute(member.AttributeLists, "MethodImpl") && member.AttributeLists.ToString().Contains("AggressiveInlining"))
             {

@@ -49,6 +49,8 @@ namespace FastScriptReload.Editor.AgentBridge
 
         static AgentReloadAutoRefreshGuard()
         {
+            // An asset import worker has no agent bridge running (see AgentReloadBridge), so nothing to guard.
+            if (AssetDatabase.IsAssetImportWorkerProcess()) return;
             EditorApplication.update += Tick;
         }
 

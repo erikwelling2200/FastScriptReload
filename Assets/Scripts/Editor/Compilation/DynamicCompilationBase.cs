@@ -67,9 +67,14 @@ namespace FastScriptReload.Editor.Compilation
         /// <summary>
         /// Looks in FSR's own package folder first: on a domain reload right after a package resolve, and in asset import workers,
         /// the asset database does not list the package's files yet, and a throw here disables FSR until the next domain reload.
+        /// The folder is found from this file's own path, which the compiler records, before asking Package Manager: during some
+        /// domain reloads Package Manager does not know the package yet either.
         /// </summary>
         private static string FindMicrosoftCSharpDll()
         {
+            var fromSource = InPackageFolderOf(ThisSourceFile());
+            if (fromSource != null) return fromSource;
+
             var package = UnityEditor.PackageManager.PackageInfo.FindForAssembly(typeof(DynamicCompilationBase).Assembly);
             if (package != null)
             {
@@ -82,6 +87,21 @@ namespace FastScriptReload.Editor.Compilation
                 .FirstOrDefault(file => file.Name.Equals("Microsoft.CSharp.dll", StringComparison.OrdinalIgnoreCase));
             if (found == null) throw new FileNotFoundException("FSR: Microsoft.CSharp.dll is in neither FSR's package folder nor the asset database");
             return found.FullName;
+        }
+
+        private static string ThisSourceFile([System.Runtime.CompilerServices.CallerFilePath] string path = "") => path;
+
+        /// <summary>Plugins/Roslyn/Microsoft.CSharp.dll under the nearest folder above <paramref name="sourceFile"/> that holds a package.json, or null.</summary>
+        private static string InPackageFolderOf(string sourceFile)
+        {
+            if (string.IsNullOrEmpty(sourceFile)) return null;
+            for (var folder = Path.GetDirectoryName(sourceFile); !string.IsNullOrEmpty(folder); folder = Path.GetDirectoryName(folder))
+            {
+                if (!File.Exists(Path.Combine(folder, "package.json"))) continue;
+                var dll = Path.Combine(folder, "Plugins", "Roslyn", "Microsoft.CSharp.dll");
+                return File.Exists(dll) ? new FileInfo(dll).FullName : null;
+            }
+            return null;
         }
         
         protected static CreateSourceCodeCombinedContentsResult CreateSourceCodeCombinedContents(List<string> sourceCodeFiles, List<string> definedPreprocessorSymbols)
