@@ -80,6 +80,8 @@ namespace FastScriptReload.Runtime
                 sw.Start();
                 LastDetourIssues.Clear();
 
+                if (UsesNonPublicMembersOfOtherAssemblies(dynamicallyLoadedAssemblyWithUpdates)) RunThroughDynamicMethods(dynamicallyLoadedAssemblyWithUpdates);
+
                 foreach (var createdValueType in dynamicallyLoadedAssemblyWithUpdates.GetTypes().Where(t => t.IsValueType && !t.IsEnum && !t.IsPrimitive && !(SkipCompilerGeneratedTypes && IsCompilerGenerated(t))))
                 {
                     if (ProjectTypeCache.TryGetType(RemoveClassPostfix(createdValueType.FullName), out _))
@@ -176,6 +178,45 @@ namespace FastScriptReload.Runtime
             }
         }
         
+        /// <summary>
+        /// Whether the patch was compiled to use the private and internal members of other assemblies - the original nested types
+        /// of the file it patches - which the compiler marks with IgnoresAccessChecksTo.
+        /// </summary>
+        private static bool UsesNonPublicMembersOfOtherAssemblies(Assembly patch) =>
+            patch.GetCustomAttributesData().Any(attribute => attribute.AttributeType.Name == "IgnoresAccessChecksToAttribute");
+
+        private static readonly Type DynamicMethodDefinitionType = typeof(Harmony).Assembly.GetType("MonoMod.Utils.DynamicMethodDefinition");
+
+        /// <summary>
+        /// Points every method of <paramref name="patch"/> at a copy of itself made as a dynamic method that skips visibility
+        /// checks. Unity's Mono checks access again when it runs the patch and ignores IgnoresAccessChecksTo, so compiled patch
+        /// code may not touch a private nested type of the type it patches; dynamic methods are exempt. Every method, the
+        /// compiler-generated ones behind coroutines and lambdas too, since the patch calls those, not the originals.
+        /// Generic methods and methods of generic types cannot be copied and stay as compiled.
+        /// </summary>
+        private void RunThroughDynamicMethods(Assembly patch)
+        {
+            const BindingFlags declared = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static | BindingFlags.Instance | BindingFlags.DeclaredOnly;
+            foreach (var type in patch.GetTypes().Where(type => !type.IsGenericTypeDefinition && !type.IsInterface))
+            {
+                var methods = type.GetMethods(declared).Cast<MethodBase>().Concat(type.GetConstructors(declared))
+                    .Where(method => !method.IsAbstract && !method.IsGenericMethodDefinition && method.GetMethodBody() != null);
+                foreach (var method in methods)
+                {
+                    try
+                    {
+                        var definition = Activator.CreateInstance(DynamicMethodDefinitionType, method);
+                        var copy = (MethodInfo)DynamicMethodDefinitionType.GetMethod("Generate", Type.EmptyTypes).Invoke(definition, null);
+                        Memory.DetourMethod(method, copy);
+                    }
+                    catch (Exception e)
+                    {
+                        LastDetourIssues.Add(new DetourIssue(RemoveClassPostfix(type.FullName), method.Name, $"could not run as a dynamic method, so it may not reach private members: {(e.InnerException ?? e).Message}"));
+                    }
+                }
+            }
+        }
+
         public Type GetRedirectedType(Type forExistingType)
         {
             return _existingTypeToRedirectedType[forExistingType];

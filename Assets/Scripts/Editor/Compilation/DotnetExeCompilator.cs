@@ -123,7 +123,8 @@ namespace FastScriptReload.Editor.Compilation
                 var rspFileContent = GenerateCompilerArgsRspFileContents(outLibraryPath, sourceCodeCombinedFilePath, assemblyAttributeFilePath,
                     originalAssemblyPathToAsmWithInternalsVisibleToCompiled, shouldAddUnsafeFlag, defines);
                 CreateFileAndTrackAsCleanup(rspFile, rspFileContent, _createdFilesToCleanUp);
-                CreateFileAndTrackAsCleanup(assemblyAttributeFilePath, DynamicallyCreatedAssemblyAttributeSourceCode, _createdFilesToCleanUp);
+                CreateFileAndTrackAsCleanup(assemblyAttributeFilePath, DynamicallyCreatedAssemblyAttributeSourceCode + IgnoresAccessChecksToSourceCode(createSourceCodeCombinedResult.TypesToOpen),
+                    _createdFilesToCleanUp);
 
                 var exitCode = ExecuteDotnetExeCompilation(_dotnetExePath, _cscDll, rspFile, outLibraryPath, out var outputMessages);
 
@@ -178,6 +179,31 @@ You can also:
             }
         }
 
+        /// <summary>
+        /// Marks a patch that uses the private nested types and members of <paramref name="typesToOpen"/>: the copies it compiles
+        /// against open them for the compiler only. Unity's Mono checks access again when it runs the patch and ignores this
+        /// attribute, so the loader runs a marked patch through dynamic methods, which it exempts; a runtime that honours the
+        /// attribute needs nothing more. The attribute type is not in the base library, so the patch declares its own.
+        /// </summary>
+        private static string IgnoresAccessChecksToSourceCode(List<string> typesToOpen)
+        {
+            var assemblies = typesToOpen.Select(GetAssemblyByTypeName).Where(assembly => assembly != null).Select(assembly => assembly.GetName().Name).Distinct().ToList();
+            if (assemblies.Count == 0) return string.Empty;
+            var source = new StringBuilder();
+            source.AppendLine();
+            foreach (var assembly in assemblies) source.AppendLine($"[assembly: System.Runtime.CompilerServices.IgnoresAccessChecksTo(\"{assembly}\")]");
+            source.AppendLine("namespace System.Runtime.CompilerServices");
+            source.AppendLine("{");
+            source.AppendLine("    [AttributeUsage(AttributeTargets.Assembly, AllowMultiple = true)]");
+            source.AppendLine("    internal sealed class IgnoresAccessChecksToAttribute : Attribute");
+            source.AppendLine("    {");
+            source.AppendLine("        public IgnoresAccessChecksToAttribute(string assemblyName) { AssemblyName = assemblyName; }");
+            source.AppendLine("        public string AssemblyName { get; }");
+            source.AppendLine("    }");
+            source.AppendLine("}");
+            return source.ToString();
+        }
+
         private static Dictionary<string, string> CreateAssemblyCopiesWithInternalsVisibleTo(CreateSourceCodeCombinedContentsResult createSourceCodeCombinedResult, string asmName)
         {
             var originalAssemblyPathToAsmWithInternalsVisibleToCompiled = new Dictionary<string, string>();
@@ -195,7 +221,7 @@ You can also:
                 foreach (var friendAssembly in friendAssemblies)
                 {
                     var createdAssemblyWithInternalsVisibleToNewlyCompiled = AddInternalsVisibleToForAllUserAssembliesPostProcess.CreateAssemblyWithInternalsContentsVisibleTo(
-                        friendAssembly, asmName
+                        friendAssembly, asmName, createSourceCodeCombinedResult.TypesToOpen
                     );
                     originalAssemblyPathToAsmWithInternalsVisibleToCompiled.Add(friendAssembly.Location, createdAssemblyWithInternalsVisibleToNewlyCompiled);
                 }

@@ -141,7 +141,10 @@ namespace FastScriptReload.Editor.Compilation
             // Trust me, these bugs are quite confusing when first encountered!
             var errorDiagnostics = trees.SelectMany(tree => tree.GetDiagnostics()).Where(d => d.Severity == DiagnosticSeverity.Error);
             if (errorDiagnostics.Any()) throw new SourceCodeHasErrorsException(errorDiagnostics);
-            
+
+            var nestedTypeModels = SemanticModelsForNestedTypes(trees);
+            var typesToOpen = new List<string>();
+
             var sourceCodeWithAdjustments = trees.Select(tree =>
             {
                 //skip if tree.FilePath null or empty
@@ -152,7 +155,14 @@ namespace FastScriptReload.Editor.Compilation
                 }
 
                 var root = tree.GetRoot();
-                
+
+                // First, while the tree is still the one the semantic model was built from.
+                if (nestedTypeModels.TryGetValue(tree, out var nestedTypeModel))
+                {
+                    typesToOpen.AddRange(NestedTypeReferenceRewriter.TopLevelTypesWithNestedTypes(root));
+                    root = new NestedTypeReferenceRewriter(nestedTypeModel, DebugWriteRewriteReasonAsComment).Visit(root);
+                }
+
                 //WARN: needs to walk before root class name changes, otherwise it'll resolve wrong name
                 var fieldsWalker = new FieldsWalker();
                 fieldsWalker.Visit(root);
@@ -259,7 +269,46 @@ namespace FastScriptReload.Editor.Compilation
             }
             
             LoggerScoped.LogDebug("Source Code Created:\r\n\r\n" + sourceCodeCombinedSb);
-            return new CreateSourceCodeCombinedContentsResult(sourceCodeCombinedSb.ToString(), typesDefined);
+            return new CreateSourceCodeCombinedContentsResult(sourceCodeCombinedSb.ToString(), typesDefined, typesToOpen);
+        }
+
+        private static readonly Dictionary<string, (DateTime written, MetadataReference reference)> MetadataReferences = new Dictionary<string, (DateTime, MetadataReference)>();
+
+        /// <summary>
+        /// A semantic model for each tree that declares nested types, for <see cref="NestedTypeReferenceRewriter"/>; none for the
+        /// rest, so a patch without nested types pays nothing. The trees are bound against the editor's loaded assemblies, whose
+        /// copy of the same types the source wins over; binding errors elsewhere in the file do not matter to it.
+        /// </summary>
+        private static Dictionary<SyntaxTree, SemanticModel> SemanticModelsForNestedTypes(List<SyntaxTree> trees)
+        {
+            var withNestedTypes = trees.Where(tree => NestedTypeReferenceRewriter.DeclaresNestedTypes(tree.GetRoot())).ToList();
+            if (withNestedTypes.Count == 0) return new Dictionary<SyntaxTree, SemanticModel>();
+
+            var references = new List<MetadataReference>();
+            lock (MetadataReferences)
+            {
+                foreach (var path in ResolveReferencesToAdd(new List<string>()))
+                {
+                    try
+                    {
+                        var written = File.GetLastWriteTimeUtc(path);
+                        if (!MetadataReferences.TryGetValue(path, out var cached) || cached.written != written)
+                        {
+                            cached = (written, MetadataReference.CreateFromFile(path));
+                            MetadataReferences[path] = cached;
+                        }
+                        references.Add(cached.reference);
+                    }
+                    catch (Exception e)
+                    {
+                        LoggerScoped.LogDebug($"Not binding against '{path}': {e.Message}");
+                    }
+                }
+            }
+
+            var compilation = CSharpCompilation.Create("FastScriptReload.NestedTypeBinding", trees, references,
+                new CSharpCompilationOptions(OutputKind.DynamicallyLinkedLibrary, allowUnsafe: true));
+            return withNestedTypes.ToDictionary(tree => tree, tree => compilation.GetSemanticModel(tree, ignoreAccessibility: true));
         }
 
         private static SyntaxNode AddUserDefinedOverridenTypes(SyntaxNode userDefinedOverridesRoot, SyntaxNode root)
@@ -399,10 +448,17 @@ namespace FastScriptReload.Editor.Compilation
         public string SourceCode { get; }
         public List<string> TypeNamesDefinitions { get; }
 
-        public CreateSourceCodeCombinedContentsResult(string sourceCode, List<string> typeNamesDefinitions)
+        /// <summary>
+        /// Top-level types, by CLR full name, whose nested types and private members the patch names: they are opened up in the
+        /// copies of the assemblies the patch is compiled against.
+        /// </summary>
+        public List<string> TypesToOpen { get; }
+
+        public CreateSourceCodeCombinedContentsResult(string sourceCode, List<string> typeNamesDefinitions, List<string> typesToOpen = null)
         {
             SourceCode = sourceCode;
             TypeNamesDefinitions = typeNamesDefinitions;
+            TypesToOpen = typesToOpen ?? new List<string>();
         }
     }
 

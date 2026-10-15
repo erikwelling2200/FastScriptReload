@@ -86,14 +86,6 @@ namespace FastScriptReload.Editor.AgentBridge
                 if (HasAttribute(type.AttributeLists, "BurstCompile")) violations.Add($"{type.Identifier.Text} is Burst-compiled");
             }
 
-            // Only top-level types get a renamed patched copy; a nested one keeps its name, so patched code would bind to a second,
-            // unrelated type of the same name and misread the instances the original code created.
-            foreach (var nested in root.DescendantNodes().Where(node => (node is BaseTypeDeclarationSyntax || node is DelegateDeclarationSyntax) && node.Parent is TypeDeclarationSyntax))
-            {
-                var name = nested is BaseTypeDeclarationSyntax type ? type.Identifier.Text : ((DelegateDeclarationSyntax)nested).Identifier.Text;
-                violations.Add($"the file declares nested type {name}, which patched code would confuse with a copy of itself");
-            }
-
             // The patched copy of a type declares its own statics, so redirected code would read and write a second, empty copy.
             foreach (var field in root.DescendantNodes().OfType<BaseFieldDeclarationSyntax>())
             {
