@@ -171,7 +171,7 @@ namespace FastScriptReload.Editor.AgentBridge
             }
             // The compile, if any, loaded the synced cache files, unless Package Manager extracted the folder anew; a domain reload
             // without one dropped their patches. Either way the gate decides again, and answers NoCodeChange to what is in place.
-            var synced = LoadSynced();
+            var synced = LoadSynced().Where(IsOwn).ToList();
             foreach (var entry in requeue) MarkStale(loaded, entry.file, entry.package, entry.packagePath, "a recompile or domain reload dropped its hot-reloaded change");
             foreach (var entry in synced) MarkStale(loaded, entry.checkoutFile, entry.package, entry.packagePath, "a recompile or domain reload happened since it was synced; it is being checked again");
             loaded.patched.Clear();
@@ -607,13 +607,15 @@ namespace FastScriptReload.Editor.AgentBridge
             try
             {
                 var synced = LoadSynced();
-                var entry = synced.FirstOrDefault(candidate => candidate.package == result.package && candidate.packagePath == result.packagePath && Normalise(candidate.cacheRoot) == Normalise(result.cacheRoot));
+                var entry = synced.FirstOrDefault(candidate => candidate.package == result.package && candidate.packagePath == result.packagePath && SameCacheRoot(candidate, result.cacheRoot));
                 if (entry == null)
                 {
-                    entry = new SyncedFile { package = result.package, packagePath = result.packagePath, cacheRoot = result.cacheRoot, existedInPin = inCache };
+                    var cacheRoot = Normalise(result.cacheRoot).StartsWith(Normalise(ProjectPath) + "/") ? result.cacheRoot.Substring(ProjectPath.Length + 1) : result.cacheRoot;
+                    entry = new SyncedFile { package = result.package, packagePath = result.packagePath, cacheRoot = cacheRoot, existedInPin = inCache };
                     if (inCache) CopyWithMeta(cacheFile, PristineFor(entry));
                     synced.Add(entry);
                 }
+                entry.project = ProjectPath;
                 entry.checkoutFile = result.file;
                 entry.checkoutBranch = result.checkoutBranch;
 
@@ -685,9 +687,9 @@ namespace FastScriptReload.Editor.AgentBridge
             var roots = PackageInfo.GetAllRegisteredPackages().Select(package => Normalise(Path.GetFullPath(package.resolvedPath)));
             var currentRoots = new HashSet<string>(roots);
             var synced = LoadSynced();
-            var ended = synced.Where(entry => !currentRoots.Contains(Normalise(entry.cacheRoot))).ToList();
+            var ended = synced.Where(entry => !currentRoots.Contains(Normalise(CacheRootOf(entry)))).ToList();
             if (ended.Count == 0) return synced;
-            foreach (var root in ended.Select(entry => entry.cacheRoot).Distinct())
+            foreach (var root in ended.Select(CacheRootOf).Distinct())
             {
                 var pristine = Path.Combine(PristinePath, Path.GetFileName(root));
                 if (Directory.Exists(pristine)) Directory.Delete(pristine, true);
@@ -708,7 +710,7 @@ namespace FastScriptReload.Editor.AgentBridge
         private static void ForgetUndiverged(Result result)
         {
             var synced = LoadSynced();
-            var entry = synced.FirstOrDefault(candidate => candidate.package == result.package && candidate.packagePath == result.packagePath && Normalise(candidate.cacheRoot) == Normalise(result.cacheRoot));
+            var entry = synced.FirstOrDefault(candidate => candidate.package == result.package && candidate.packagePath == result.packagePath && SameCacheRoot(candidate, result.cacheRoot));
             if (entry == null || Diverges(entry)) return;
             synced.Remove(entry);
             DeleteWithMeta(PristineFor(entry));
@@ -730,7 +732,17 @@ namespace FastScriptReload.Editor.AgentBridge
             return SameText(entry.file, cacheFile);
         }
 
-        private static string CacheFileOf(SyncedFile entry) => Path.Combine(entry.cacheRoot, entry.packagePath);
+        private static string CacheFileOf(SyncedFile entry) => Path.Combine(CacheRootOf(entry), entry.packagePath);
+
+        private static string CacheRootOf(SyncedFile entry) => Path.GetFullPath(Path.Combine(ProjectPath, entry.cacheRoot));
+
+        private static bool SameCacheRoot(SyncedFile entry, string cacheRoot) => Normalise(CacheRootOf(entry)) == Normalise(Path.GetFullPath(cacheRoot));
+
+        /// <summary>
+        /// Whether this project synced the entry. One copied from another worktree still counts against builds, but is never offered
+        /// again: its checkout file is that worktree's work in progress.
+        /// </summary>
+        private static bool IsOwn(SyncedFile entry) => string.IsNullOrEmpty(entry.project) || Normalise(entry.project) == Normalise(ProjectPath);
 
         private static string PristineFor(SyncedFile entry) => Path.Combine(PristinePath, Path.GetFileName(entry.cacheRoot), entry.packagePath);
 
@@ -908,7 +920,10 @@ namespace FastScriptReload.Editor.AgentBridge
         {
             public string package;
             public string packagePath;
+            /// <summary>Relative to the project, so a copied <c>Library</c> still knows its own cache; absolute in older ledgers.</summary>
             public string cacheRoot;
+            /// <summary>The project that synced it. Another one means this ledger came along with a copied <c>Library</c>.</summary>
+            public string project;
             public string checkoutFile;
             public string checkoutBranch;
             public bool existedInPin;
