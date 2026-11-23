@@ -980,10 +980,11 @@ CustomPolling - (experimental) watches files by manual polling for changes, slow
             if ((bool)FastScriptReloadPreference.IsForceLockAssembliesViaCode.GetEditorPersistedValueOrDefault())
                 return;
             
-            LoggerScoped.LogWarning("Fast Script Reload - asset auto refresh enabled - full reload will be triggered unless editor preference adjusted - see documentation for more details.");
-
+            // "Stop showing message" covers this log too, or it repeats on every domain reload.
             if ((bool)FastScriptReloadPreference.StopShowingAutoReloadEnabledDialogBox.GetEditorPersistedValueOrDefault())
                 return;
+
+            LoggerScoped.LogWarning("Fast Script Reload - asset auto refresh enabled - full reload will be triggered unless editor preference adjusted - see documentation for more details.");
 
             var chosenOption = EditorUtility.DisplayDialogComplex("Fast Script Reload - Warning",
                 "Auto reload for assets/scripts is enabled." +
