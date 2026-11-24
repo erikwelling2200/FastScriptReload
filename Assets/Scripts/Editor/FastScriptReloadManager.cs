@@ -734,7 +734,7 @@ Workaround will search in all folders (under project root) and will use first fo
             }
         }
 
-        private static bool HotReloadDisabled_WarningMessageShownAlready;
+        internal static bool HotReloadDisabled_WarningMessageShownAlready;
         private static void EnsureInitialized()
         {
             if (!(bool)FastScriptReloadPreference.EnableAutoReloadForChangedFiles.GetEditorPersistedValueOrDefault()

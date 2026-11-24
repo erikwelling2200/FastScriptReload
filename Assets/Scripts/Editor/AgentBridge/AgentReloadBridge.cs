@@ -147,6 +147,8 @@ namespace FastScriptReload.Editor.AgentBridge
             FastScriptReloadPreference.IsDidFieldsOrPropertyCountChangedCheckDisabled.SetEditorPersistedValue(false);
             // That dialog is modal and blocks the editor; AgentReloadAutoRefreshGuard decides about refreshes instead.
             FastScriptReloadPreference.StopShowingAutoReloadEnabledDialogBox.SetEditorPersistedValue(true);
+            // With every watcher off by design, FSR's "file watchers will not be initialized" warning is noise.
+            FastScriptReloadManager.HotReloadDisabled_WarningMessageShownAlready = true;
         }
 
         /// <summary>
